@@ -114,8 +114,11 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 		if j.StartedAt.Before(start) {
 			start = j.StartedAt.Time
 		}
-		if j.CompletedAt.After(end) {
+		if j.CompletedAt != nil && j.CompletedAt.After(end) {
 			end = j.CompletedAt.Time
+		}
+		if j.StartedAt.After(end) {
+			end = j.StartedAt.Time
 		}
 		log.Printf("start=%s, end=%s", start, end)
 	}
@@ -161,6 +164,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	owner, repo := chunks[0], chunks[1]
 	opt := &github.ListWorkflowJobsOptions{
 		// Filter: "all",
 	}
@@ -175,7 +179,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		job, _, err := s.client.Actions.GetWorkflowJobByID(ctx, chunks[0], chunks[1], id)
+		job, _, err := s.client.Actions.GetWorkflowJobByID(ctx, owner, repo, id)
 		if err != nil {
 			return fmt.Errorf("GetWorkflowJobByID: %w", err)
 		}
@@ -187,7 +191,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 			//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7291646262, opt)
 			//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7333592988, opt)
 
-			jobs, resp, err := s.client.Actions.ListWorkflowJobs(ctx, chunks[0], chunks[1], run, opt)
+			jobs, resp, err := s.client.Actions.ListWorkflowJobs(ctx, owner, repo, run, opt)
 			if err != nil {
 				return fmt.Errorf("ListWorkflowJobs: %w", err)
 			}
@@ -211,8 +215,11 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		if j.StartedAt.Before(start) {
 			start = j.StartedAt.Time
 		}
-		if j.CompletedAt.After(end) {
+		if j.CompletedAt != nil && j.CompletedAt.After(end) {
 			end = j.CompletedAt.Time
+		}
+		if j.StartedAt.After(end) {
+			end = j.StartedAt.Time
 		}
 		log.Printf("start=%s, end=%s", start, end)
 	}
@@ -226,7 +233,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		},
 	}
 
-	buildTree(root, allJobs)
+	buildTree(owner, repo, end, root, allJobs)
 
 	fmt.Fprint(w, header)
 	writeSpan(w, nil, root)
@@ -265,7 +272,7 @@ func buildCheckTree(root *Node, runs []*github.CheckRun) {
 	})
 }
 
-func buildTree(root *Node, allJobs []*github.WorkflowJob) {
+func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.WorkflowJob) {
 	root.Children = make([]*Node, 0, len(allJobs))
 
 	for _, j := range allJobs {
@@ -279,11 +286,20 @@ func buildTree(root *Node, allJobs []*github.WorkflowJob) {
 			task := &Span{
 				Name:      t.GetName(),
 				StartTime: t.StartedAt.Time,
-				EndTime:   t.CompletedAt.Time,
+			}
+			if t.CompletedAt != nil {
+				task.EndTime = t.CompletedAt.Time
+			} else {
+				task.EndTime = end
+				task.Flavor = "not finished"
 			}
 
 			if conc := t.GetConclusion(); conc != "success" {
-				task.Flavor = conc
+				if conc != "" {
+					task.Flavor = conc
+				}
+				// TODO: Can we link to specific failures?
+				task.FlavorHref = fmt.Sprintf("https://github.com/%s/%s/commit/%s/checks/%d/logs", owner, repo, j.GetHeadSHA(), j.GetID())
 			}
 
 			steps = append(steps, &Node{
@@ -295,11 +311,22 @@ func buildTree(root *Node, allJobs []*github.WorkflowJob) {
 			Name:      j.GetName(),
 			Href:      j.GetHTMLURL(),
 			StartTime: j.StartedAt.Time,
-			EndTime:   j.CompletedAt.Time,
+		}
+
+		if j.CompletedAt != nil {
+			job.EndTime = j.CompletedAt.Time
+		} else {
+			job.EndTime = end
+			job.Flavor = "not finished"
 		}
 
 		if conc := j.GetConclusion(); conc != "success" {
-			job.Flavor = conc
+			if conc != "" {
+				job.Flavor = conc
+			}
+			// There's an API for getting a logs URL but it doesn't seem to work actually (403).
+			// TODO: Can we link to specific failures?
+			job.FlavorHref = fmt.Sprintf("https://github.com/%s/%s/commit/%s/checks/%d/logs", owner, repo, j.GetHeadSHA(), j.GetID())
 		}
 
 		root.Children = append(root.Children, &Node{
@@ -342,7 +369,11 @@ func writeSpan(w io.Writer, parent, node *Node) {
 		href = fmt.Sprintf(`<a href=%q>%s</a>`, node.Span.Href, dur)
 	}
 	if flavor := node.Span.Flavor; flavor != "" {
-		href += " (" + flavor + ")"
+		if fref := node.Span.FlavorHref; fref != "" {
+			href += fmt.Sprintf(` (<a href=%q>%s</a>)`, fref, flavor)
+		} else {
+			href += fmt.Sprintf(` (%s)`, flavor)
+		}
 	}
 
 	if len(node.Children) == 0 {
@@ -412,9 +443,10 @@ const landing = `
 
 // Thank you mholt.
 type Span struct {
-	Name      string `json:"Name"`
-	Href      string
-	Flavor    string
-	StartTime time.Time `json:"StartTime"`
-	EndTime   time.Time `json:"EndTime"`
+	Name       string `json:"Name"`
+	Href       string
+	Flavor     string
+	FlavorHref string
+	StartTime  time.Time `json:"StartTime"`
+	EndTime    time.Time `json:"EndTime"`
 }
