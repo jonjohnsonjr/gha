@@ -395,6 +395,7 @@ span {
 }
 body {
 	width: 100%;
+	margin: 0px;
 }
 div.parent:hover {
 	outline: 1.5px solid lightgrey;
