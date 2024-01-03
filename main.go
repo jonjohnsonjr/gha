@@ -91,7 +91,7 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 
 	allRuns := []*github.CheckRun{}
 	for {
-		runs, resp, err := s.client.Checks.ListCheckRunsForRef(ctx, chunks[0], chunks[1], pr.Head.GetRef(), opt)
+		runs, resp, err := s.client.Checks.ListCheckRunsForRef(ctx, chunks[0], chunks[1], pr.Head.GetSHA(), opt)
 		if err != nil {
 			return fmt.Errorf("ListCheckRunsForRef: %w", err)
 		}
@@ -169,24 +169,38 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	end := time.Unix(0, 0)
 
 	allJobs := []*github.WorkflowJob{}
-	for {
-		log.Printf("list workflow job")
-		//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7291646262, opt)
-		//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7333592988, opt)
 
-		jobs, resp, err := s.client.Actions.ListWorkflowJobs(ctx, chunks[0], chunks[1], run, opt)
+	if len(chunks) > 5 && chunks[5] == "job" {
+		id, err := strconv.ParseInt(chunks[6], 10, 64)
 		if err != nil {
-			return fmt.Errorf("ListWorkflowJobs: %w", err)
+			return err
 		}
-		log.Printf("total %d", jobs.GetTotalCount())
-		allJobs = append(allJobs, jobs.Jobs...)
-		if resp.NextPage == 0 {
-			break
+		job, _, err := s.client.Actions.GetWorkflowJobByID(ctx, chunks[0], chunks[1], id)
+		if err != nil {
+			return fmt.Errorf("GetWorkflowJobByID: %w", err)
 		}
-		log.Printf("added %d jobs", len(jobs.Jobs))
-		log.Printf("allJobs = %d ", len(allJobs))
-		opt.Page = resp.NextPage
-		log.Printf("opt.Page = %d", opt.Page)
+
+		allJobs = append(allJobs, job)
+	} else {
+		for {
+			log.Printf("list workflow job")
+			//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7291646262, opt)
+			//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7333592988, opt)
+
+			jobs, resp, err := s.client.Actions.ListWorkflowJobs(ctx, chunks[0], chunks[1], run, opt)
+			if err != nil {
+				return fmt.Errorf("ListWorkflowJobs: %w", err)
+			}
+			log.Printf("total %d", jobs.GetTotalCount())
+			allJobs = append(allJobs, jobs.Jobs...)
+			if resp.NextPage == 0 {
+				break
+			}
+			log.Printf("added %d jobs", len(jobs.Jobs))
+			log.Printf("allJobs = %d ", len(allJobs))
+			opt.Page = resp.NextPage
+			log.Printf("opt.Page = %d", opt.Page)
+		}
 	}
 
 	slices.SortFunc(allJobs, func(a, b *github.WorkflowJob) int {
