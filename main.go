@@ -25,8 +25,6 @@ func main() {
 }
 
 func mainE(ctx context.Context) error {
-	log.Printf("client")
-
 	client := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 
 	s := server{
@@ -95,15 +93,11 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 		if err != nil {
 			return fmt.Errorf("ListCheckRunsForRef: %w", err)
 		}
-		log.Printf("total %d", runs.GetTotal())
 		allRuns = append(allRuns, runs.CheckRuns...)
 		if resp.NextPage == 0 {
 			break
 		}
-		log.Printf("added %d runs", len(runs.CheckRuns))
-		log.Printf("allRuns = %d ", len(allRuns))
 		opt.Page = resp.NextPage
-		log.Printf("opt.Page = %d", opt.Page)
 	}
 
 	slices.SortFunc(allRuns, func(a, b *github.CheckRun) int {
@@ -120,7 +114,6 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 		if j.StartedAt.After(end) {
 			end = j.StartedAt.Time
 		}
-		log.Printf("start=%s, end=%s", start, end)
 	}
 
 	root := &Node{
@@ -187,23 +180,15 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		allJobs = append(allJobs, job)
 	} else {
 		for {
-			log.Printf("list workflow job")
-			//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7291646262, opt)
-			//jobs, resp, err := client.Actions.ListWorkflowJobs(ctx, "chainguard-images", "images", 7333592988, opt)
-
 			jobs, resp, err := s.client.Actions.ListWorkflowJobs(ctx, owner, repo, run, opt)
 			if err != nil {
 				return fmt.Errorf("ListWorkflowJobs: %w", err)
 			}
-			log.Printf("total %d", jobs.GetTotalCount())
 			allJobs = append(allJobs, jobs.Jobs...)
 			if resp.NextPage == 0 {
 				break
 			}
-			log.Printf("added %d jobs", len(jobs.Jobs))
-			log.Printf("allJobs = %d ", len(allJobs))
 			opt.Page = resp.NextPage
-			log.Printf("opt.Page = %d", opt.Page)
 		}
 	}
 
@@ -221,7 +206,6 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		if j.StartedAt.After(end) {
 			end = j.StartedAt.Time
 		}
-		log.Printf("start=%s, end=%s", start, end)
 	}
 
 	root := &Node{
@@ -341,7 +325,6 @@ func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.
 }
 
 func writeSpan(w io.Writer, parent, node *Node) {
-	log.Printf("%q has %d children", node.Span.Name, len(node.Children))
 	if parent == nil {
 		fmt.Fprint(w, `<div>`)
 	} else {
@@ -350,12 +333,9 @@ func writeSpan(w io.Writer, parent, node *Node) {
 		left := node.Span.StartTime.Sub(parent.Span.StartTime)
 		right := parent.Span.EndTime.Sub(node.Span.EndTime)
 
-		log.Printf("%s %s %s", total, left, right)
-
 		leftpad := float64(left) / float64(total)
 		rightpad := float64(right) / float64(total)
 
-		log.Printf("%f %f", leftpad, rightpad)
 		if len(node.Children) == 0 {
 			fmt.Fprintf(w, `<div style="margin: 1px %f%% 0 %f%%">`, 100.0*rightpad, 100.0*leftpad)
 		} else {
