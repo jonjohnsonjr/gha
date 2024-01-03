@@ -65,12 +65,89 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.Request, uri string) error {
+	// TODO: Handle "/attempts/1"
+	_, after, ok := strings.Cut(uri, "github.com/")
+	if !ok {
+		return fmt.Errorf("what is this: %q", uri)
+	}
+	chunks := strings.Split(after, "/")
+	pull, err := strconv.Atoi(chunks[3])
+	if err != nil {
+		return err
+	}
+
+	pr, _, err := s.client.PullRequests.Get(ctx, chunks[0], chunks[1], pull)
+	if err != nil {
+		return fmt.Errorf("PullRequests.Get: %w", err)
+	}
+
+	opt := &github.ListCheckRunsOptions{
+		// Filter: "all",
+	}
+
+	start := time.Unix(1<<62, 0)
+	end := time.Unix(0, 0)
+
+	allRuns := []*github.CheckRun{}
+	for {
+		runs, resp, err := s.client.Checks.ListCheckRunsForRef(ctx, chunks[0], chunks[1], pr.Head.GetRef(), opt)
+		if err != nil {
+			return fmt.Errorf("ListCheckRunsForRef: %w", err)
+		}
+		log.Printf("total %d", runs.GetTotal())
+		allRuns = append(allRuns, runs.CheckRuns...)
+		if resp.NextPage == 0 {
+			break
+		}
+		log.Printf("added %d runs", len(runs.CheckRuns))
+		log.Printf("allRuns = %d ", len(allRuns))
+		opt.Page = resp.NextPage
+		log.Printf("opt.Page = %d", opt.Page)
+	}
+
+	slices.SortFunc(allRuns, func(a, b *github.CheckRun) int {
+		return cmp.Compare(a.StartedAt.UnixMicro(), b.StartedAt.UnixMicro())
+	})
+
+	for _, j := range allRuns {
+		if j.StartedAt.Before(start) {
+			start = j.StartedAt.Time
+		}
+		if j.CompletedAt.After(end) {
+			end = j.CompletedAt.Time
+		}
+		log.Printf("start=%s, end=%s", start, end)
+	}
+
+	root := &Node{
+		Span: &Span{
+			Name:      uri,
+			Href:      uri,
+			StartTime: start,
+			EndTime:   end,
+		},
+	}
+
+	buildCheckTree(root, allRuns)
+
+	fmt.Fprint(w, header)
+	writeSpan(w, nil, root)
+	fmt.Fprint(w, footer)
+
+	return nil
+}
+
 func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	uri := r.URL.Query().Get("uri")
 
 	if uri == "" {
 		return nil
+	}
+
+	if strings.Contains(uri, "/pull/") {
+		return s.handlePull(ctx, w, r, uri)
 	}
 
 	// TODO: Handle "/attempts/1"
@@ -147,6 +224,31 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 type Node struct {
 	Span     *Span
 	Children []*Node
+}
+
+func buildCheckTree(root *Node, runs []*github.CheckRun) {
+	root.Children = make([]*Node, 0, len(runs))
+
+	for _, j := range runs {
+		job := &Span{
+			Name:      j.GetName(),
+			Href:      fmt.Sprintf("/trace?uri=%s", j.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
+			StartTime: j.StartedAt.Time,
+			EndTime:   j.CompletedAt.Time,
+		}
+
+		if conc := j.GetConclusion(); conc != "success" {
+			job.Flavor = conc
+		}
+
+		root.Children = append(root.Children, &Node{
+			Span: job,
+		})
+	}
+
+	slices.SortFunc(root.Children, func(a, b *Node) int {
+		return a.Span.StartTime.Compare(b.Span.StartTime)
+	})
 }
 
 func buildTree(root *Node, allJobs []*github.WorkflowJob) {
