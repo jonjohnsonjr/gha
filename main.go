@@ -237,9 +237,9 @@ func writeSpan(w io.Writer, parent, node *Node) {
 		}
 	} else {
 		if node.Span.Flavor == "failure" {
-			fmt.Fprintf(w, `<details><summary style="font-weight: bold; color: red">%s %s</summary>`, node.Span.Name, href)
+			fmt.Fprintf(w, `<details><summary style="font-weight: bold; color: red; cursor: pointer;">%s %s</summary>`, node.Span.Name, href)
 		} else {
-			fmt.Fprintf(w, `<details><summary>%s %s</summary>`, node.Span.Name, href)
+			fmt.Fprintf(w, `<details><summary stype="cursor: pointer;">%s %s</summary>`, node.Span.Name, href)
 		}
 		for _, child := range node.Children {
 			writeSpan(w, node, child)
