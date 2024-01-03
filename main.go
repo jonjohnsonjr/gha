@@ -231,13 +231,13 @@ func writeSpan(w io.Writer, parent, node *Node) {
 
 	if len(node.Children) == 0 {
 		if node.Span.Flavor == "failure" {
-			fmt.Fprintf(w, `<span style="font-weight: bold; color: red">%s %s</span>`, node.Span.Name, href)
+			fmt.Fprintf(w, `<span style="font-weight: bold; color:white; background-color: red">%s %s</span>`, node.Span.Name, href)
 		} else {
 			fmt.Fprintf(w, `<span>%s %s</span>`, node.Span.Name, href)
 		}
 	} else {
 		if node.Span.Flavor == "failure" {
-			fmt.Fprintf(w, `<details><summary style="font-weight: bold; color: red">%s %s</summary>`, node.Span.Name, href)
+			fmt.Fprintf(w, `<details><summary style="font-weight: bold; color: white; background-color: red">%s %s</summary>`, node.Span.Name, href)
 		} else {
 			fmt.Fprintf(w, `<details><summary>%s %s</summary>`, node.Span.Name, href)
 		}
