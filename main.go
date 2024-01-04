@@ -239,11 +239,18 @@ func buildCheckTree(root *Node, runs []*github.CheckRun) {
 			Name:      j.GetName(),
 			Href:      fmt.Sprintf("/trace?uri=%s", j.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
 			StartTime: j.StartedAt.Time,
-			EndTime:   j.CompletedAt.Time,
+		}
+		if j.CompletedAt != nil {
+			job.EndTime = j.CompletedAt.Time
+		} else {
+			job.EndTime = job.StartTime
+			job.Flavor = "not finished"
 		}
 
 		if conc := j.GetConclusion(); conc != "success" {
-			job.Flavor = conc
+			if conc != "" {
+				job.Flavor = conc
+			}
 		}
 
 		root.Children = append(root.Children, &Node{
