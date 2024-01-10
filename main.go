@@ -266,6 +266,8 @@ func buildCheckTree(root *Node, runs []*github.CheckRun) {
 func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.WorkflowJob) {
 	root.Children = make([]*Node, 0, len(allJobs))
 
+	byGroup := map[string]*Node{}
+
 	for _, j := range allJobs {
 		slices.SortFunc(j.Steps, func(a, b *github.TaskStep) int {
 			return a.StartedAt.Compare(b.StartedAt.Time)
@@ -320,7 +322,38 @@ func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.
 			job.FlavorHref = fmt.Sprintf("https://github.com/%s/%s/commit/%s/checks/%d/logs", owner, repo, j.GetHeadSHA(), j.GetID())
 		}
 
-		root.Children = append(root.Children, &Node{
+		group, jobName, ok := strings.Cut(j.GetName(), " / ")
+		if !ok {
+			root.Children = append(root.Children, &Node{
+				Span:     job,
+				Children: steps,
+			})
+
+			continue
+		}
+
+		// If we got here, it's nested jobs.
+		job.Name = jobName
+		node, ok := byGroup[group]
+		if !ok {
+			node = &Node{
+				Span: &Span{
+					Name:      group,
+					StartTime: job.StartTime,
+					EndTime:   job.EndTime,
+				},
+				Children: []*Node{},
+			}
+			byGroup[group] = node
+
+			// First time we hit this add it to root.
+			root.Children = append(root.Children, node)
+		}
+
+		if job.EndTime.After(node.Span.EndTime) {
+			node.Span.EndTime = job.EndTime
+		}
+		node.Children = append(node.Children, &Node{
 			Span:     job,
 			Children: steps,
 		})
