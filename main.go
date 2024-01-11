@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -128,6 +129,7 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 	buildCheckTree(root, allRuns)
 
 	fmt.Fprint(w, header)
+	fmt.Fprintf(w, landing, uri)
 	writeSpan(w, nil, root)
 	fmt.Fprint(w, footer)
 
@@ -220,6 +222,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	buildTree(owner, repo, end, root, allJobs)
 
 	fmt.Fprint(w, header)
+	fmt.Fprintf(w, landing, uri)
 	writeSpan(w, nil, root)
 	fmt.Fprint(w, footer)
 
@@ -419,7 +422,7 @@ func writeSpan(w io.Writer, parent, node *Node) {
 const header = `
 <html>
 <head>
-<title>trace thing</title>
+<title>gha.dag.dev</title>
 <style>
 summary {
   border: 1px solid;
@@ -434,6 +437,7 @@ span {
   padding: 3px;
 }
 body {
+	font-family: monospace;
 	width: 100%;
 	margin: 0px;
 }
@@ -450,14 +454,21 @@ const footer = `
 `
 
 func land(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/favicon.svg" || r.URL.Path == "/favicon.ico" {
+		w.Header().Set("Cache-Control", "max-age=3600")
+		http.ServeFile(w, r, filepath.Join(os.Getenv("KO_DATA_PATH"), "favicon.svg"))
+		return
+	}
+
 	fmt.Fprint(w, header)
-	fmt.Fprint(w, landing)
+	fmt.Fprintf(w, landing, "https://github.com/wolfi-dev/os/actions/runs/7390601887")
 	fmt.Fprint(w, footer)
 }
 
 const landing = `
+<h1>⏱️ GitHub Actions Trace Viewer</h1>
 <form action="/trace" method="GET" autocomplete="off" spellcheck="false">
-<input size="100" type="text" name="uri" value="https://github.com/wolfi-dev/os/actions/runs/7390601887"/>
+<input size="100" type="text" name="uri" value="%s"/>
 <input type="submit" />
 </form>
 `
