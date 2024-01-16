@@ -237,27 +237,59 @@ type Node struct {
 func buildCheckTree(root *Node, runs []*github.CheckRun) {
 	root.Children = make([]*Node, 0, len(runs))
 
-	for _, j := range runs {
-		job := &Span{
-			Name:      j.GetName(),
-			Href:      fmt.Sprintf("/trace?uri=%s", j.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
-			StartTime: j.StartedAt.Time,
+	byGroup := map[string]*Node{}
+
+	for _, r := range runs {
+		run := &Span{
+			Name:      r.GetName(),
+			Href:      fmt.Sprintf("/trace?uri=%s", r.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
+			StartTime: r.StartedAt.Time,
 		}
-		if j.CompletedAt != nil {
-			job.EndTime = j.CompletedAt.Time
+		if r.CompletedAt != nil {
+			run.EndTime = r.CompletedAt.Time
 		} else {
-			job.EndTime = job.StartTime
-			job.Flavor = "not finished"
+			run.EndTime = run.StartTime
+			run.Flavor = "not finished"
 		}
 
-		if conc := j.GetConclusion(); conc != "success" {
+		if conc := r.GetConclusion(); conc != "success" {
 			if conc != "" {
-				job.Flavor = conc
+				run.Flavor = conc
 			}
 		}
 
-		root.Children = append(root.Children, &Node{
-			Span: job,
+		group, runName, ok := strings.Cut(run.Name, " / ")
+		if !ok {
+			root.Children = append(root.Children, &Node{
+				Span: run,
+			})
+
+			continue
+		}
+
+		// If we got here, it's nested runs.
+		run.Name = runName
+		node, ok := byGroup[group]
+		if !ok {
+			node = &Node{
+				Span: &Span{
+					Name:      group,
+					StartTime: run.StartTime,
+					EndTime:   run.EndTime,
+				},
+				Children: []*Node{},
+			}
+			byGroup[group] = node
+
+			// First time we hit this add it to root.
+			root.Children = append(root.Children, node)
+		}
+
+		if run.EndTime.After(node.Span.EndTime) {
+			node.Span.EndTime = run.EndTime
+		}
+		node.Children = append(node.Children, &Node{
+			Span: run,
 		})
 	}
 
