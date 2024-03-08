@@ -64,6 +64,78 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) handleFilename(ctx context.Context, w http.ResponseWriter, r *http.Request, uri string) error {
+	_, after, ok := strings.Cut(uri, "github.com/")
+	if !ok {
+		return fmt.Errorf("what is this: %q", uri)
+	}
+	chunks := strings.Split(after, "/")
+
+	opt := &github.ListWorkflowRunsOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 25,
+		},
+	}
+
+	start := time.Unix(1<<62, 0)
+	end := time.Unix(0, 0)
+
+	allRuns := []*github.WorkflowRun{}
+	for {
+		runs, resp, err := s.client.Actions.ListWorkflowRunsByFileName(ctx, chunks[0], chunks[1], chunks[4], opt)
+		if err != nil {
+			return fmt.Errorf("ListWorkflowRunsByFileName: %w", err)
+		}
+		allRuns = append(allRuns, runs.WorkflowRuns...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+
+		if len(allRuns) >= 50 {
+			break
+		}
+	}
+
+	allRuns = slices.DeleteFunc(allRuns, func(run *github.WorkflowRun) bool {
+		return run.Conclusion == nil || *run.Conclusion == ""
+	})
+
+	slices.SortFunc(allRuns, func(a, b *github.WorkflowRun) int {
+		return cmp.Compare(a.GetRunStartedAt().UnixMicro(), b.GetRunStartedAt().UnixMicro())
+	})
+
+	for _, j := range allRuns {
+		if j.GetRunStartedAt().Before(start) {
+			start = j.GetRunStartedAt().Time
+		}
+		if j.GetUpdatedAt().After(end) {
+			end = j.GetUpdatedAt().Time
+		}
+		if j.GetRunStartedAt().After(end) {
+			end = j.GetRunStartedAt().Time
+		}
+	}
+
+	root := &Node{
+		Span: &Span{
+			Name:      uri,
+			Href:      uri,
+			StartTime: start,
+			EndTime:   end,
+		},
+	}
+
+	buildWorkflowRunTree(root, allRuns)
+
+	fmt.Fprint(w, header)
+	fmt.Fprintf(w, landing, uri)
+	writeSpan(w, nil, root)
+	fmt.Fprint(w, footer)
+
+	return nil
+}
+
 func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.Request, uri string) error {
 	// TODO: Handle "/attempts/1"
 	_, after, ok := strings.Cut(uri, "github.com/")
@@ -146,6 +218,9 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 
 	if strings.Contains(uri, "/pull/") {
 		return s.handlePull(ctx, w, r, uri)
+	}
+	if strings.HasSuffix(uri, ".yaml") {
+		return s.handleFilename(ctx, w, r, uri)
 	}
 
 	// TODO: Handle "/attempts/1"
@@ -251,6 +326,65 @@ func buildCheckTree(root *Node, runs []*github.CheckRun) {
 			run.EndTime = run.StartTime
 			run.Flavor = "not finished"
 		}
+
+		if conc := r.GetConclusion(); conc != "success" {
+			if conc != "" {
+				run.Flavor = conc
+			}
+		}
+
+		group, runName, ok := strings.Cut(run.Name, " / ")
+		if !ok {
+			root.Children = append(root.Children, &Node{
+				Span: run,
+			})
+
+			continue
+		}
+
+		// If we got here, it's nested runs.
+		run.Name = runName
+		node, ok := byGroup[group]
+		if !ok {
+			node = &Node{
+				Span: &Span{
+					Name:      group,
+					StartTime: run.StartTime,
+					EndTime:   run.EndTime,
+				},
+				Children: []*Node{},
+			}
+			byGroup[group] = node
+
+			// First time we hit this add it to root.
+			root.Children = append(root.Children, node)
+		}
+
+		if run.EndTime.After(node.Span.EndTime) {
+			node.Span.EndTime = run.EndTime
+		}
+		node.Children = append(node.Children, &Node{
+			Span: run,
+		})
+	}
+
+	slices.SortFunc(root.Children, func(a, b *Node) int {
+		return a.Span.StartTime.Compare(b.Span.StartTime)
+	})
+}
+
+func buildWorkflowRunTree(root *Node, runs []*github.WorkflowRun) {
+	root.Children = make([]*Node, 0, len(runs))
+
+	byGroup := map[string]*Node{}
+
+	for _, r := range runs {
+		run := &Span{
+			Name:      r.GetName(),
+			Href:      fmt.Sprintf("/trace?uri=%s", r.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
+			StartTime: r.GetRunStartedAt().Time,
+		}
+		run.EndTime = r.GetUpdatedAt().Time
 
 		if conc := r.GetConclusion(); conc != "success" {
 			if conc != "" {
