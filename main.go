@@ -12,11 +12,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	bufra "github.com/avvmoto/buf-readerat"
 	"github.com/snabb/httpreaderat"
@@ -38,10 +41,21 @@ func mainE(ctx context.Context) error {
 
 	s := server{
 		client: client,
+		oauth2: &oauth2.Config{
+			ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://github.com/login/oauth/authorize",
+				TokenURL: "https://github.com/login/oauth/access_token",
+			},
+		},
 	}
 
 	log.Print("starting server...")
 	http.HandleFunc("/trace", s.handler)
+	http.HandleFunc("/api/github/hook", s.webhook)
+	http.HandleFunc("/callback", s.callback)
+	http.HandleFunc("/auth", s.auth)
 	http.HandleFunc("/", land)
 
 	// Determine port for HTTP service.
@@ -62,6 +76,122 @@ func mainE(ctx context.Context) error {
 
 type server struct {
 	client *github.Client
+
+	// TODO: Use this.
+	oauth2 *oauth2.Config
+}
+
+func (s *server) Client(r *http.Request) *github.Client {
+	if cookie, err := r.Cookie("gh_access_token"); err == nil {
+		return github.NewClient(nil).WithAuthToken(cookie.Value)
+	} else {
+		log.Printf("cookie error: %v", err)
+	}
+
+	return s.client
+}
+
+func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
+}
+
+type TokenResp struct {
+	// AccessToken is the token that authorizes and authenticates
+	// the requests.
+	AccessToken string `json:"access_token"`
+	ExpiresIn   int    `json:"expires_in,omitempty"`
+
+	// RefreshToken is a token that's used by the application
+	// (as opposed to the user) to refresh the access token
+	// if it expires.
+	RefreshToken          string `json:"refresh_token,omitempty"`
+	RefreshTokenExpiresIn int    `json:"refresh_token_expires_in,omitempty"`
+
+	TokenType string `json:"token_type,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+}
+
+func (s *server) callback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+
+	if err := func() error {
+		u, err := url.Parse("https://github.com/login/oauth/access_token")
+		if err != nil {
+			return err
+		}
+
+		q := u.Query()
+		q.Set("client_id", os.Getenv("GITHUB_CLIENT_ID"))
+		q.Set("client_secret", os.Getenv("GITHUB_CLIENT_SECRET"))
+		q.Set("code", code)
+		q.Set("redirect_uri", "https://gha.dag.dev/callback")
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u.String(), nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Add("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("POST: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("status %d", resp.StatusCode)
+		}
+
+		var tok TokenResp
+		if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+			return fmt.Errorf("decode: %w", err)
+		}
+
+		atCookie := &http.Cookie{
+			Name:     "gh_access_token",
+			Value:    tok.AccessToken,
+			Secure:   true,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Expires:  time.Now().Add(time.Second * time.Duration(tok.ExpiresIn)),
+		}
+		http.SetCookie(w, atCookie)
+
+		rtCookie := &http.Cookie{
+			Name:     "gh_refresh_token",
+			Value:    tok.RefreshToken,
+			Secure:   true,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Expires:  time.Now().Add(time.Second * time.Duration(tok.RefreshTokenExpiresIn)),
+		}
+		http.SetCookie(w, rtCookie)
+
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		return nil
+	}(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+func (s *server) auth(w http.ResponseWriter, r *http.Request) {
+	if err := func() error {
+		u, err := url.Parse("https://github.com/login/oauth/authorize")
+		if err != nil {
+			return err
+		}
+
+		q := u.Query()
+		q.Set("client_id", os.Getenv("GITHUB_CLIENT_ID"))
+		q.Set("redirect_uri", "https://gha.dag.dev/callback")
+
+		u.RawQuery = q.Encode()
+
+		http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
+
+		return nil
+	}(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
 }
 
 func (s *server) handler(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +220,7 @@ func (s *server) handleFilename(ctx context.Context, w http.ResponseWriter, r *h
 
 	allRuns := []*github.WorkflowRun{}
 	for {
-		runs, resp, err := s.client.Actions.ListWorkflowRunsByFileName(ctx, chunks[0], chunks[1], chunks[4], opt)
+		runs, resp, err := s.Client(r).Actions.ListWorkflowRunsByFileName(ctx, chunks[0], chunks[1], chunks[4], opt)
 		if err != nil {
 			return fmt.Errorf("ListWorkflowRunsByFileName: %w", err)
 		}
@@ -156,7 +286,7 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 		return err
 	}
 
-	pr, _, err := s.client.PullRequests.Get(ctx, chunks[0], chunks[1], pull)
+	pr, _, err := s.Client(r).PullRequests.Get(ctx, chunks[0], chunks[1], pull)
 	if err != nil {
 		return fmt.Errorf("PullRequests.Get: %w", err)
 	}
@@ -170,7 +300,7 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 
 	allRuns := []*github.CheckRun{}
 	for {
-		runs, resp, err := s.client.Checks.ListCheckRunsForRef(ctx, chunks[0], chunks[1], pr.Head.GetSHA(), opt)
+		runs, resp, err := s.Client(r).Checks.ListCheckRunsForRef(ctx, chunks[0], chunks[1], pr.Head.GetSHA(), opt)
 		if err != nil {
 			return fmt.Errorf("ListCheckRunsForRef: %w", err)
 		}
@@ -256,7 +386,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	lopt := &github.ListOptions{}
-	artifacts, _, err := s.client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, run, lopt)
+	artifacts, _, err := s.Client(r).Actions.ListWorkflowRunArtifacts(ctx, owner, repo, run, lopt)
 	if err != nil {
 		return fmt.Errorf("listing artifacts: %w", err)
 	}
@@ -279,7 +409,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		job, _, err := s.client.Actions.GetWorkflowJobByID(ctx, owner, repo, id)
+		job, _, err := s.Client(r).Actions.GetWorkflowJobByID(ctx, owner, repo, id)
 		if err != nil {
 			return fmt.Errorf("GetWorkflowJobByID: %w", err)
 		}
@@ -288,7 +418,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 
 	} else {
 		for {
-			jobs, resp, err := s.client.Actions.ListWorkflowJobs(ctx, owner, repo, run, opt)
+			jobs, resp, err := s.Client(r).Actions.ListWorkflowJobs(ctx, owner, repo, run, opt)
 			if err != nil {
 				return fmt.Errorf("ListWorkflowJobs: %w", err)
 			}
@@ -724,7 +854,7 @@ func (s *server) renderLogs(w http.ResponseWriter, r *http.Request, art string) 
 	chunks := strings.Split(after, "/")
 	owner, repo := chunks[0], chunks[1]
 
-	url, _, err := s.client.Actions.DownloadArtifact(ctx, owner, repo, id, 3)
+	url, _, err := s.Client(r).Actions.DownloadArtifact(ctx, owner, repo, id, 3)
 	if err != nil {
 		return fmt.Errorf("calling DownloadArtifact: %w", err)
 	}
@@ -888,7 +1018,7 @@ func (s *server) renderTrot(w http.ResponseWriter, r *http.Request, art string) 
 	chunks := strings.Split(after, "/")
 	owner, repo := chunks[0], chunks[1]
 
-	url, _, err := s.client.Actions.DownloadArtifact(ctx, owner, repo, id, 3)
+	url, _, err := s.Client(r).Actions.DownloadArtifact(ctx, owner, repo, id, 3)
 	if err != nil {
 		return fmt.Errorf("calling DownloadArtifact: %w", err)
 	}
