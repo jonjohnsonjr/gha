@@ -243,10 +243,10 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if art := r.URL.Query().Get("artifact"); art != "" {
-		if name := r.URL.Query().Get("name"); strings.HasPrefix(name, "trace-") {
-			return s.renderTrot(w, r, art)
-		} else {
+		if name := r.URL.Query().Get("name"); strings.HasPrefix(name, "logs-") {
 			return s.renderLogs(w, r, art)
+		} else {
+			return s.renderTrot(w, r, art)
 		}
 	}
 
@@ -256,13 +256,10 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	lopt := &github.ListOptions{}
-	log.Printf("listing artifacts")
 	artifacts, _, err := s.client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, run, lopt)
 	if err != nil {
 		return fmt.Errorf("listing artifacts: %w", err)
 	}
-
-	log.Printf("Artifacts: %v", artifacts)
 
 	files := []*github.Artifact{}
 	for _, artifact := range artifacts.Artifacts {
@@ -810,7 +807,6 @@ func (s *server) renderTlog(w http.ResponseWriter, r io.Reader) error {
 		}
 
 		ts := strings.TrimPrefix(before, "time=")
-		log.Printf("ts=%q", ts)
 
 		when, err := time.Parse(time.RFC3339, ts)
 		if err != nil {
@@ -926,7 +922,14 @@ func (s *server) renderTrot(w http.ResponseWriter, r *http.Request, art string) 
 		return err
 	}
 
-	return trotMain(w, file)
+	fmt.Fprint(w, header)
+	fmt.Fprintf(w, landing, uri)
+	if err := trotMain(w, file); err != nil {
+		return err
+	}
+	fmt.Fprint(w, footer)
+
+	return nil
 }
 
 func trotMain(w io.Writer, r io.Reader) error {
@@ -986,7 +989,6 @@ func trotMain(w io.Writer, r io.Reader) error {
 		}
 	}
 
-	fmt.Fprint(w, header)
 	for _, rootSpan := range rootSpans {
 		root := &TrotNode{
 			Span: rootSpan,
@@ -996,8 +998,6 @@ func trotMain(w io.Writer, r io.Reader) error {
 
 		trotWriteSpan(w, nil, root)
 	}
-
-	fmt.Fprint(w, footer)
 	return nil
 }
 
