@@ -26,6 +26,8 @@ import (
 
 	"github.com/google/go-github/v57/github"
 	"golang.org/x/exp/slices"
+
+	hgzip "github.com/nanmu42/gzip"
 )
 
 func main() {
@@ -52,11 +54,13 @@ func mainE(ctx context.Context) error {
 	}
 
 	log.Print("starting server...")
-	http.HandleFunc("/trace", s.handler)
-	http.HandleFunc("/api/github/hook", s.webhook)
-	http.HandleFunc("/callback", s.callback)
-	http.HandleFunc("/auth", s.auth)
-	http.HandleFunc("/", land)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/trace", s.handler)
+	mux.HandleFunc("/api/github/hook", s.webhook)
+	mux.HandleFunc("/callback", s.callback)
+	mux.HandleFunc("/auth", s.auth)
+	mux.HandleFunc("/", land)
 
 	// Determine port for HTTP service.
 	port := os.Getenv("PORT")
@@ -67,7 +71,7 @@ func mainE(ctx context.Context) error {
 
 	// Start HTTP server.
 	log.Printf("listening on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, hgzip.DefaultHandler().WrapHandler(mux)); err != nil {
 		return fmt.Errorf("ListenAndServe: %w", err)
 	}
 
@@ -375,6 +379,8 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	if art := r.URL.Query().Get("artifact"); art != "" {
 		if name := r.URL.Query().Get("name"); strings.HasPrefix(name, "logs-") {
 			return s.renderLogs(w, r, art)
+		} else if name == "coverage" {
+			return s.renderCoverage(w, r, art)
 		} else {
 			return s.renderTrot(w, r, art)
 		}
@@ -394,7 +400,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	files := []*github.Artifact{}
 	for _, artifact := range artifacts.Artifacts {
 		name := artifact.GetName()
-		if strings.HasPrefix(name, "trace-") || strings.HasPrefix(name, "logs-") {
+		if strings.HasPrefix(name, "trace-") || strings.HasPrefix(name, "logs-") || name == "coverage" {
 			files = append(files, artifact)
 		}
 	}
@@ -825,6 +831,72 @@ type Span struct {
 	EndTime    time.Time `json:"EndTime"`
 }
 
+func (s *server) renderCoverage(w http.ResponseWriter, r *http.Request, art string) error {
+	name := r.URL.Query().Get("name")
+
+	id, err := strconv.ParseInt(art, 10, 64)
+	if err != nil {
+		return err
+	}
+
+	ctx := r.Context()
+	uri := r.URL.Query().Get("uri")
+
+	if uri == "" {
+		return nil
+	}
+
+	_, after, ok := strings.Cut(uri, "github.com/")
+	if !ok {
+		return fmt.Errorf("what is this: %q", uri)
+	}
+	chunks := strings.Split(after, "/")
+	owner, repo := chunks[0], chunks[1]
+
+	url, _, err := s.Client(r).Actions.DownloadArtifact(ctx, owner, repo, id, 3)
+	if err != nil {
+		return fmt.Errorf("calling DownloadArtifact: %w", err)
+	}
+
+	log.Printf("artifact url: %s", url)
+
+	req, err := http.NewRequestWithContext(r.Context(), "GET", url.String(), nil)
+	if err != nil {
+		return err
+	}
+
+	htrdr, err := httpreaderat.New(nil, req, nil)
+	if err != nil {
+		return err
+	}
+	bhtrdr := bufra.NewBufReaderAt(htrdr, 1024*1024)
+
+	zr, err := zip.NewReader(bhtrdr, htrdr.Size())
+	if err != nil {
+		return err
+	}
+
+	if file := r.URL.Query().Get("file"); file != "" {
+		return s.renderFile(w, r, zr, file)
+	}
+
+	fmt.Fprint(w, header)
+	fmt.Fprintf(w, landing, uri)
+	fmt.Fprintf(w, "<h3>Files in %s</h3>\n", name)
+	fmt.Fprintf(w, "<p><ul>\n")
+	for _, f := range zr.File {
+		// TODO: Encode offset and size so we can Range it.
+		u := r.URL
+		q := u.Query()
+		q.Set("file", f.Name)
+		u.RawQuery = q.Encode()
+		fmt.Fprintf(w, "<li><a href=%q>%s</a></li>\n", u.String(), f.Name)
+	}
+	fmt.Fprintf(w, "</ul></p>\n")
+	fmt.Fprint(w, footer)
+	return nil
+}
+
 func (s *server) renderLogs(w http.ResponseWriter, r *http.Request, art string) error {
 	// TODO
 	// qsize := r.URL.Get("size")
@@ -912,6 +984,23 @@ func (s *server) renderLog(w http.ResponseWriter, r *http.Request, zr *zip.Reade
 		return err
 	}
 	fmt.Fprint(w, tlogFooter)
+	return nil
+}
+
+func (s *server) renderFile(w http.ResponseWriter, r *http.Request, zr *zip.Reader, file string) error {
+	rc, err := zr.Open(file)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	lm := io.LimitReader(rc, 1024*1024)
+
+	w.Header().Set("Content-Security-Policy", "object-src 'none'; base-uri 'none';")
+	if _, err := io.Copy(w, lm); err != nil {
+		return err
+	}
+
 	return nil
 }
 
