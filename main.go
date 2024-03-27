@@ -754,10 +754,14 @@ func writeSpan(w io.Writer, parent, node *Node) {
 			fmt.Fprintf(w, `<span>%s %s</span>`, node.Span.Name, href)
 		}
 	} else {
+		open := ""
+		if parent == nil {
+			open = " open"
+		}
 		if node.Span.Flavor == "failure" {
-			fmt.Fprintf(w, `<details><summary style="font-weight: bold; color: white; background-color: red">%s %s</summary>`, node.Span.Name, href)
+			fmt.Fprintf(w, `<details%s><summary style="font-weight: bold; color: white; background-color: red">%s %s</summary>`, open, node.Span.Name, href)
 		} else {
-			fmt.Fprintf(w, `<details><summary>%s %s</summary>`, node.Span.Name, href)
+			fmt.Fprintf(w, `<details%s><summary>%s %s</summary>`, open, node.Span.Name, href)
 		}
 		for _, child := range node.Children {
 			writeSpan(w, node, child)
@@ -1272,7 +1276,11 @@ func trotWriteSpan(w io.Writer, parent, node *TrotNode) {
 	if len(node.Children) == 0 {
 		fmt.Fprintf(w, `<span>%s %s</span>`, node.Span.Name, dur)
 	} else {
-		fmt.Fprintf(w, `<details><summary>%s %s</summary>`, node.Span.Name, dur)
+		open := ""
+		if parent == nil {
+			open = " open"
+		}
+		fmt.Fprintf(w, `<details%s><summary>%s %s</summary>`, open, node.Span.Name, dur)
 		for _, child := range node.Children {
 			trotWriteSpan(w, node, child)
 		}
