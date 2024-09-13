@@ -778,7 +778,7 @@ func writeSpan(w io.Writer, parent, node *Node) {
 		}
 	} else {
 		open := ""
-		if parent == nil {
+		if parent == nil || len(parent.Children) == 1 {
 			open = " open"
 		}
 		if node.Span.Flavor == "failure" {
@@ -1300,7 +1300,7 @@ func trotWriteSpan(w io.Writer, parent, node *TrotNode) {
 		fmt.Fprintf(w, `<span>%s %s</span>`, node.Span.Name, dur)
 	} else {
 		open := ""
-		if parent == nil {
+		if parent == nil || len(parent.Children) == 1 {
 			open = " open"
 		}
 		fmt.Fprintf(w, `<details%s><summary>%s %s</summary>`, open, node.Span.Name, dur)
