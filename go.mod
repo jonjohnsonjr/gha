@@ -1,6 +1,6 @@
 module github.com/jonjohnsonjr/gha
 
-go 1.21.5
+go 1.23
 
 require (
 	github.com/avvmoto/buf-readerat v0.0.0-20171115124131-a17c8cb89270

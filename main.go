@@ -219,7 +219,7 @@ func (s *server) handleFilename(ctx context.Context, w http.ResponseWriter, r *h
 		},
 	}
 
-	start := time.Unix(1<<62, 0)
+	start := time.Now()
 	end := time.Unix(0, 0)
 
 	allRuns := []*github.WorkflowRun{}
@@ -244,18 +244,17 @@ func (s *server) handleFilename(ctx context.Context, w http.ResponseWriter, r *h
 	})
 
 	slices.SortFunc(allRuns, func(a, b *github.WorkflowRun) int {
-		return cmp.Compare(a.GetRunStartedAt().UnixMicro(), b.GetRunStartedAt().UnixMicro())
+		return compareTimestamp(a.RunStartedAt, b.RunStartedAt)
 	})
 
 	for _, j := range allRuns {
-		if j.GetRunStartedAt().Before(start) {
-			start = j.GetRunStartedAt().Time
-		}
-		if j.GetUpdatedAt().After(end) {
-			end = j.GetUpdatedAt().Time
-		}
-		if j.GetRunStartedAt().After(end) {
-			end = j.GetRunStartedAt().Time
+		if rsa := j.RunStartedAt; rsa != nil {
+			if rsa.Before(start) {
+				start = rsa.Time
+			}
+			if rsa.After(end) {
+				end = rsa.Time
+			}
 		}
 	}
 
@@ -299,7 +298,7 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 		// Filter: "all",
 	}
 
-	start := time.Unix(1<<62, 0)
+	start := time.Now()
 	end := time.Unix(0, 0)
 
 	allRuns := []*github.CheckRun{}
@@ -316,18 +315,22 @@ func (s *server) handlePull(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 
 	slices.SortFunc(allRuns, func(a, b *github.CheckRun) int {
-		return cmp.Compare(a.StartedAt.UnixMicro(), b.StartedAt.UnixMicro())
+		return compareTimestamp(a.StartedAt, b.StartedAt)
 	})
 
 	for _, j := range allRuns {
-		if j.StartedAt.Before(start) {
-			start = j.StartedAt.Time
+		if started := j.StartedAt; started != nil {
+			if started.Before(start) {
+				start = started.Time
+			}
+			if started.After(end) {
+				end = started.Time
+			}
 		}
-		if j.CompletedAt != nil && j.CompletedAt.After(end) {
+		if j.CompletedAt == nil {
+			end = time.Now()
+		} else if j.CompletedAt.After(end) {
 			end = j.CompletedAt.Time
-		}
-		if j.StartedAt.After(end) {
-			end = j.StartedAt.Time
 		}
 	}
 
@@ -405,7 +408,7 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	start := time.Unix(1<<62, 0)
+	start := time.Now()
 	end := time.Unix(0, 0)
 
 	allJobs := []*github.WorkflowJob{}
@@ -437,18 +440,22 @@ func (s *server) handlerE(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	slices.SortFunc(allJobs, func(a, b *github.WorkflowJob) int {
-		return cmp.Compare(a.StartedAt.UnixMicro(), b.StartedAt.UnixMicro())
+		return compareTimestamp(a.StartedAt, b.StartedAt)
 	})
 
 	for _, j := range allJobs {
-		if j.StartedAt.Before(start) {
-			start = j.StartedAt.Time
+		if started := j.StartedAt; started != nil {
+			if started.Before(start) {
+				start = started.Time
+			}
+			if started.After(end) {
+				end = started.Time
+			}
 		}
-		if j.CompletedAt != nil && j.CompletedAt.After(end) {
+		if j.CompletedAt == nil {
+			end = time.Now()
+		} else if j.CompletedAt.After(end) {
 			end = j.CompletedAt.Time
-		}
-		if j.StartedAt.After(end) {
-			end = j.StartedAt.Time
 		}
 	}
 
@@ -500,12 +507,12 @@ func buildCheckTree(root *Node, runs []*github.CheckRun) {
 		run := &Span{
 			Name:      r.GetName(),
 			Href:      fmt.Sprintf("/trace?uri=%s", r.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
-			StartTime: r.StartedAt.Time,
+			StartTime: cmp.Or(r.GetStartedAt().Time, time.Now()),
 		}
 		if r.CompletedAt != nil {
 			run.EndTime = r.CompletedAt.Time
 		} else {
-			run.EndTime = run.StartTime
+			run.EndTime = time.Now()
 			run.Flavor = "not finished"
 		}
 
@@ -564,7 +571,7 @@ func buildWorkflowRunTree(root *Node, runs []*github.WorkflowRun) {
 		run := &Span{
 			Name:      r.GetName(),
 			Href:      fmt.Sprintf("/trace?uri=%s", r.GetHTMLURL()), // TODO: Use HTMX to load this in-line.
-			StartTime: r.GetRunStartedAt().Time,
+			StartTime: cmp.Or(r.GetRunStartedAt().Time, time.Now()),
 		}
 		run.EndTime = r.GetUpdatedAt().Time
 
@@ -614,6 +621,22 @@ func buildWorkflowRunTree(root *Node, runs []*github.WorkflowRun) {
 	})
 }
 
+func compareTimestamp(a, b *github.Timestamp) int {
+	if a == nil && b == nil {
+		return 0
+	}
+
+	if a == nil {
+		return 1
+	}
+
+	if b == nil {
+		return -1
+	}
+
+	return a.Compare(b.Time)
+}
+
 func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.WorkflowJob) {
 	root.Children = make([]*Node, 0, len(allJobs))
 
@@ -621,7 +644,7 @@ func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.
 
 	for _, j := range allJobs {
 		slices.SortFunc(j.Steps, func(a, b *github.TaskStep) int {
-			return a.StartedAt.Compare(b.StartedAt.Time)
+			return compareTimestamp(a.StartedAt, b.StartedAt)
 		})
 
 		steps := make([]*Node, 0, len(j.Steps))
@@ -629,7 +652,7 @@ func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.
 		for _, t := range j.Steps {
 			task := &Span{
 				Name:      t.GetName(),
-				StartTime: t.StartedAt.Time,
+				StartTime: cmp.Or(t.GetStartedAt().Time, time.Now()),
 			}
 			if t.CompletedAt != nil {
 				task.EndTime = t.CompletedAt.Time
@@ -654,7 +677,7 @@ func buildTree(owner, repo string, end time.Time, root *Node, allJobs []*github.
 		job := &Span{
 			Name:      j.GetName(),
 			Href:      j.GetHTMLURL(),
-			StartTime: j.StartedAt.Time,
+			StartTime: cmp.Or(j.GetStartedAt().Time, time.Now()),
 		}
 
 		if j.CompletedAt != nil {
